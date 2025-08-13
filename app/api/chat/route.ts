@@ -21,18 +21,37 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'Message is required' }, { status: 400 });
     }
 
+    // Get or create user
+    let user = await prisma.user.findUnique({
+      where: { clerkId: userId }
+    });
+
+    if (!user) {
+      user = await prisma.user.create({
+        data: {
+          clerkId: userId,
+          email: '',
+        }
+      });
+    }
+
     // Get or create conversation
     let conversation;
     if (conversationId) {
       conversation = await prisma.conversation.findUnique({
-        where: { id: conversationId, userId },
+        where: { id: conversationId, userId: user.id },
         include: { messages: { orderBy: { createdAt: 'asc' } } }
       });
     } else {
+      // Create new conversation with a proper title
+      const title = message.length > 50 
+        ? message.slice(0, 50) + '...' 
+        : message;
+      
       conversation = await prisma.conversation.create({
         data: {
-          title: message.slice(0, 50) + '...',
-          userId,
+          title: title,
+          userId: user.id,
         },
         include: { messages: true }
       });
@@ -43,7 +62,7 @@ export async function POST(req: NextRequest) {
     }
 
     // Save user message
-    const userMessage = await prisma.message.create({
+    await prisma.message.create({
       data: {
         content: message,
         role: 'user',
@@ -70,47 +89,48 @@ export async function POST(req: NextRequest) {
       max_tokens: 4000,
     });
 
-    // Create assistant message placeholder
-    const assistantMessage = await prisma.message.create({
-      data: {
-        content: '',
-        role: 'assistant',
-        conversationId: conversation.id,
-        model,
-      }
-    });
-
-    // Update conversation title if it's new
-    if (!conversationId) {
-      await prisma.conversation.update({
-        where: { id: conversation.id },
-        data: { title: message.slice(0, 50) + '...' }
-      });
-    }
-
     // Create streaming response
     const encoder = new TextEncoder();
     const readable = new ReadableStream({
       async start(controller) {
         let fullContent = '';
         
-        for await (const chunk of stream) {
-          const content = chunk.choices[0]?.delta?.content || '';
-          fullContent += content;
-          
-          if (content) {
-            controller.enqueue(encoder.encode(`data: ${JSON.stringify({ content })}\n\n`));
+        try {
+          for await (const chunk of stream) {
+            const content = chunk.choices[0]?.delta?.content || '';
+            fullContent += content;
+            
+            if (content) {
+              controller.enqueue(encoder.encode(`data: ${JSON.stringify({ 
+                content,
+                conversationId: conversation.id 
+              })}\n\n`));
+            }
           }
+
+          // Save assistant message
+          await prisma.message.create({
+            data: {
+              content: fullContent,
+              role: 'assistant',
+              conversationId: conversation.id,
+              model,
+            }
+          });
+
+          // Update conversation timestamp
+          await prisma.conversation.update({
+            where: { id: conversation.id },
+            data: { updatedAt: new Date() }
+          });
+
+          controller.enqueue(encoder.encode(`data: [DONE]\n\n`));
+          controller.close();
+        } catch (error) {
+          console.error('Streaming error:', error);
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify({ error: 'Streaming failed' })}\n\n`));
+          controller.close();
         }
-
-        // Update the message with full content
-        await prisma.message.update({
-          where: { id: assistantMessage.id },
-          data: { content: fullContent }
-        });
-
-        controller.enqueue(encoder.encode(`data: [DONE]\n\n`));
-        controller.close();
       }
     });
 
@@ -145,11 +165,23 @@ export async function GET(req: NextRequest) {
       return NextResponse.json({ error: 'Conversation ID is required' }, { status: 400 });
     }
 
+    // Get user
+    const user = await prisma.user.findUnique({
+      where: { clerkId: userId }
+    });
+
+    if (!user) {
+      return NextResponse.json({ error: 'User not found' }, { status: 404 });
+    }
+
     const conversation = await prisma.conversation.findUnique({
-      where: { id: conversationId, userId },
+      where: { id: conversationId, userId: user.id },
       include: {
         messages: {
           orderBy: { createdAt: 'asc' }
+        },
+        _count: {
+          select: { messages: true }
         }
       }
     });

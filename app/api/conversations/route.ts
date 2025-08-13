@@ -1,5 +1,4 @@
-// crud 
-
+// app/api/conversations/route.ts
 import { NextRequest, NextResponse } from 'next/server';
 import { auth } from '@clerk/nextjs/server';
 import { PrismaClient } from '@/app/generated/prisma';
@@ -20,9 +19,23 @@ export async function GET(req: NextRequest) {
 
     const skip = (page - 1) * limit;
 
+    // Get or create user
+    let user = await prisma.user.findUnique({
+      where: { clerkId: userId }
+    });
+
+    if (!user) {
+      user = await prisma.user.create({
+        data: {
+          clerkId: userId,
+          email: '',
+        }
+      });
+    }
+
     const conversations = await prisma.conversation.findMany({
       where: {
-        userId,
+        userId: user.id,
         isArchived: archived,
       },
       include: {
@@ -34,14 +47,17 @@ export async function GET(req: NextRequest) {
           select: { messages: true }
         }
       },
-      orderBy: { updatedAt: 'desc' },
+      orderBy: [
+        { isPinned: 'desc' },
+        { updatedAt: 'desc' }
+      ],
       skip,
       take: limit,
     });
 
     const total = await prisma.conversation.count({
       where: {
-        userId,
+        userId: user.id,
         isArchived: archived,
       },
     });
@@ -77,10 +93,24 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'Title is required' }, { status: 400 });
     }
 
+    // Get or create user
+    let user = await prisma.user.findUnique({
+      where: { clerkId: userId }
+    });
+
+    if (!user) {
+      user = await prisma.user.create({
+        data: {
+          clerkId: userId,
+          email: '',
+        }
+      });
+    }
+
     const conversation = await prisma.conversation.create({
       data: {
         title,
-        userId,
+        userId: user.id,
       },
       include: {
         messages: true,
@@ -113,15 +143,25 @@ export async function PUT(req: NextRequest) {
       return NextResponse.json({ error: 'Conversation ID is required' }, { status: 400 });
     }
 
+    // Get user
+    const user = await prisma.user.findUnique({
+      where: { clerkId: userId }
+    });
+
+    if (!user) {
+      return NextResponse.json({ error: 'User not found' }, { status: 404 });
+    }
+
     const conversation = await prisma.conversation.update({
       where: {
         id,
-        userId,
+        userId: user.id,
       },
       data: {
         ...(title && { title }),
         ...(typeof isArchived === 'boolean' && { isArchived }),
         ...(typeof isPinned === 'boolean' && { isPinned }),
+        updatedAt: new Date(),
       },
       include: {
         messages: true,
@@ -154,10 +194,19 @@ export async function DELETE(req: NextRequest) {
       return NextResponse.json({ error: 'Conversation ID is required' }, { status: 400 });
     }
 
+    // Get user
+    const user = await prisma.user.findUnique({
+      where: { clerkId: userId }
+    });
+
+    if (!user) {
+      return NextResponse.json({ error: 'User not found' }, { status: 404 });
+    }
+
     await prisma.conversation.delete({
       where: {
         id,
-        userId,
+        userId: user.id,
       },
     });
 
